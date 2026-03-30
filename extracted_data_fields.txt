@@ -1,0 +1,46 @@
+GroupSlashAxe = true
+_BottleGaugeMax = 100
+_BottelGaugeLow = 37
+_BottleGauge = 100
+
+_BottleRecoverTime = 300.0
+_BottleRecoverValue = 5
+_BottleRecoverTimer = 300.0
+_BottleReduceTimer = 300.0
+
+_NoUseSlashGaugeTime = 0.0
+_NoUseSlashGaugeTimer = 0.0
+_AxeSwingEffect = nil
+
+_BottleAwakeAssistTimer = 0.0
+_BottleAwakeEffectAxe = nil
+_BottleAwakeEffectSword = nil
+_BottleAwakeGauge = 0.0
+_BottleAwakeReduceTimer = 0.0
+_BottleAwakeGaugeReduceTime = 300.0
+_BottleAwakeGaugeReduceValue = 5.0
+_BottleAwakeDurationTimer = 0.0
+_BottleAwakeDurationTime = 2700.0
+_BottleAwakeShellMaxCount = 4
+_BottleAwakeGauge = 0.0
+_BottleElementValue = 20.0
+
+_AxeSwingEffect = nil
+_SwordEffect = nil
+_SlaveBottleType = 2
+_ElementCounterHAEffect = nil
+_ElementCounterReadyEffect = nil
+
+
+<IsHitWireAttackSword>k__BackingField = false
+<AxeSwingCount>k__BackingField = 0
+<IsReduceBottheGauge>k__BackingField = false
+<IsHitElementStab>k__BackingField = false
+<ElementStabStickEmID>k__BackingField = -1
+<ElementStabStickJointName>k__BackingField = nil
+<ElementStabStickConstAxist>k__BackingField = 0
+<ElementStabStickConstState>k__BackingField = 0
+<IsElementStabStickFixPosture>k__BackingField = false
+<IsSwingStaminaEmpty>k__BackingField = false
+<AxeSwingCount>k__BackingField = 3
+<IsEnableElementCounterEffect>k__BackingField = false
