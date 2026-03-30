@@ -34,6 +34,8 @@ local COL_SWORD_MODE   = colour(80,  160, 255, 255)  -- Sword mode label
 local COL_AXE_MODE     = colour(180, 100, 40,  255)  -- Axe mode label
 local COL_TEXT         = colour(255, 255, 255, 255)  -- White
 local COL_TEXT_DIM     = colour(160, 160, 160, 255)  -- Dimmed
+local COL_RELOAD_YES   = colour(220, 60,  60,  255)  -- Red dot = reload required
+local COL_RELOAD_NO    = colour(80,  200, 120, 255)  -- Green dot = no reload
 
 -- ============================================================
 -- PLAYER ACCESS
@@ -64,11 +66,7 @@ local function getField(obj, name, default)
 end
 
 -- ============================================================
--- DRAW HELPERS
--- REFramework exposes screen drawing via the `draw` table:
---   draw.filled_rect(x, y, w, h, colour)
---   draw.outline_rect(x, y, w, h, colour, thickness)
---   draw.text(text, x, y, colour)
+-- DRAW
 -- ============================================================
 
 local function drawBar(x, y, w, h, fraction, colFg, colBg, label, labelCol)
@@ -83,39 +81,48 @@ local function drawBar(x, y, w, h, fraction, colFg, colBg, label, labelCol)
     end
 end
 
--- ============================================================
--- MAIN DRAW
--- ============================================================
 re.on_frame(function()
     local player = getPlayer()
     if not player then return end
 
-    local isSwordMode      = getField(player, "GroupSlashAxe", false)
-    local bottleGauge      = getField(player, "_BottleGauge", 0)
-    local bottleGaugeLow   = getField(player, "_BottelGaugeLow", 37)
-    local assistTimer      = getField(player, "_BottleAwakeAssistTimer", 0)
-    local assistTimerMax   = 3600.0
-    local awakeGauge       = getField(player, "_BottleAwakeGauge", 0)
-    local awakeDuration    = getField(player, "_BottleAwakeDurationTimer", 0)
+    local swordEffect = getField(player, "_SwordEffect", nil)
+    local isSwordMode = swordEffect ~= nil
+    local bottleGauge = getField(player, "_BottleGauge", 0)
+    local bottleGaugeLow = getField(player, "_BottelGaugeLow", 37)
+    local assistTimer = getField(player, "_BottleAwakeAssistTimer", 0)
+    local assistTimerMax = 3600.0
+    local awakeGauge = getField(player, "_BottleAwakeGauge", 0)
+    local awakeDuration = getField(player, "_BottleAwakeDurationTimer", 0)
     local awakeDurationMax = getField(player, "_BottleAwakeDurationTime", 2700)
 
-    local isAmped      = awakeGauge > 0
+    local isAmped = awakeGauge > 0
     local arrowsActive = assistTimer > 0
+    local reloadRequired = bottleGauge <= 36
 
     local gaugeFraction = bottleGauge / 100
     local arrowFraction = assistTimer / assistTimerMax
-    local ampFraction   = awakeDuration / awakeDurationMax
+    local ampFraction = awakeDuration / awakeDurationMax
 
     local gaugeColour = (bottleGauge <= bottleGaugeLow) and COL_GAUGE_LOW or COL_GAUGE_NORMAL
 
-    local cx   = HUD_X
-    local cy   = HUD_Y
+    local cx = HUD_X
+    local cy = HUD_Y
     local barW = HUD_W
     local barH = 14
 
     -- MODE LABEL
     draw.text(isSwordMode and "SWORD MODE" or "AXE MODE", cx, cy,
         isSwordMode and COL_SWORD_MODE or COL_AXE_MODE)
+
+    -- RELOAD INDICATOR DOT
+    local dotX = cx + 140
+    local dotY = cy + 8
+    local dotR = 6
+    draw.filled_circle(dotX, dotY, dotR, reloadRequired and COL_RELOAD_YES or COL_RELOAD_NO, 12)
+    draw.outline_circle(dotX, dotY, dotR, colour(255, 255, 255, 60), 12)
+    draw.text(reloadRequired and "RELOAD" or "NO RELOAD", dotX + dotR + 5, cy,
+        reloadRequired and COL_RELOAD_YES or COL_TEXT_DIM)
+
     cy = cy + 20
 
     -- SWITCH GAUGE
@@ -126,7 +133,7 @@ re.on_frame(function()
     cy = cy + barH + 10
 
     -- RELOAD LIMIT
-    draw.text("RELOAD LIMIT", cx, cy, arrowsActive and COL_ARROWS or COL_TEXT_DIM)
+    draw.text("ELEMENT AMP", cx, cy, arrowsActive and COL_ARROWS or COL_TEXT_DIM)
     cy = cy + 14
     drawBar(cx, cy, barW, barH,
         arrowsActive and arrowFraction or 0,
@@ -136,7 +143,7 @@ re.on_frame(function()
     cy = cy + barH + 10
 
     -- AMPED CHARGE
-    draw.text("AMPED CHARGE", cx, cy, isAmped and COL_AMP_ACTIVE or COL_TEXT_DIM)
+    draw.text("SWORD AMP", cx, cy, isAmped and COL_AMP_ACTIVE or COL_TEXT_DIM)
     cy = cy + 14
     drawBar(cx, cy, barW, barH,
         isAmped and ampFraction or 0,
