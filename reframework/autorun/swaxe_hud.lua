@@ -1,7 +1,6 @@
--- main.lua
--- Transplanted Swaxe UI from Wilds
--- Note: The vanilla Switch Axe UI will still be visible
--- Hiding it via Lua alone is not straightforward and is left as a future task
+--main.lua
+--transplanted Swaxe UI from Wilds
+--vanilla Switch Axe gauge is hidden via via.gui.GUI component disable
 
 -- ===========================================================
 -- CONFIG change to match resolution, change scale to change ui size
@@ -97,6 +96,80 @@ local function getField(obj, name, default)
     return default
 end
 
+--returns true only when HUD should be visible
+--1. Player is in a quest (not hub/lobby) PlayerQuestBase only exists in quests
+--2. Player has Swaxe equipped; type name contains "SlashAxe"
+local function shouldShowHUD(player)
+    if not player then return false end
+
+    local ok, isQuest = pcall(function()
+        return player:get_type_definition():is_a("snow.player.PlayerQuestBase")
+    end)
+    if not ok or not isQuest then return false end
+
+    local typeName = player:get_type_definition():get_full_name()
+    if not typeName:find("SlashAxe") then return false end
+
+    return true
+end
+
+-- ============================================================
+-- VANILLA HUD SUPPRESSION
+-- finds the via.gui.GUI component on the S_AxeGauge GameObject
+-- and disables it each frame while our HUD is active
+-- re-enables it when leaving a quest or switching weapons
+-- so other parts of the game are not affected
+-- ============================================================
+local vanillaGuiComponent = nil  --cached reference
+
+local function getVanillaGuiComponent()
+    if vanillaGuiComponent then return vanillaGuiComponent end
+    local guiManager = sdk.get_managed_singleton("snow.gui.GuiManager")
+    if not guiManager then return nil end
+    local ok, weaponUI = pcall(function()
+        return guiManager:get_field("guiHudWeaponUIObject")
+    end)
+    if not ok or not weaponUI then return nil end
+    local ok2, components = pcall(function()
+        return weaponUI:call("get_Components")
+    end)
+    if not ok2 or not components then return nil end
+    local count = components:call("get_Count")
+    for i = 0, count - 1 do
+        local c = components:call("get_Item", i)
+        if c and c:get_type_definition():get_full_name() == "via.gui.GUI" then
+            vanillaGuiComponent = c
+            return vanillaGuiComponent
+        end
+    end
+    return nil
+end
+
+local function setVanillaHudVisible(visible)
+    local c = getVanillaGuiComponent()
+    if not c then return end
+    pcall(function() c:call("set_Enabled", visible) end)
+end
+
+-- ============================================================
+-- POSITION PERSISTENCE
+-- saves hudX/hudY to reframework/data/swaxe_hud.json
+-- loads on startup so position survives resets and game restarts
+-- ============================================================
+local CONFIG_FILE = "swaxe_hud.json"
+
+local function savePosition()
+    json.dump_file(CONFIG_FILE, { x = hudX, y = hudY })
+end
+
+local function loadPosition()
+    local data = json.load_file(CONFIG_FILE)
+    if data and type(data.x) == "number" and type(data.y) == "number" then
+        hudX = data.x
+        hudY = data.y
+    end
+end
+
 -- ============================================================
 -- HUD STATE
 -- ============================================================
@@ -105,6 +178,26 @@ local hudY = SCREEN_HEIGHT - DISP_H - 100
 local hudVisible = true
 local dragging = false
 local dsMX, dsMY, dsHX, dsHY = 0, 0, 0, 0
+
+--load saved position immediately, overwriting the defaults above if a save exists
+loadPosition()
+
+-- ============================================================
+-- FADE STATE
+-- fadeCurrent: 0.0 = fully hidden, 1.0 = fully visible
+-- fadeTarget:  what we are animating toward
+-- ============================================================
+local fadeCurrent = 0.0
+local fadeTarget  = 0.0
+local FADE_SPEED  = 3.0  -- full fade takes ~0.33s
+
+-- ============================================================
+-- AMPED FLASH STATE
+-- shows "AMPED!" text briefly when sword amp activates
+-- ============================================================
+local ampedFlashTimer    = 0.0
+local AMPED_FLASH_DURATION = 2.5
+local wasAmped           = false
 
 local function sx(ix) return hudX + ix * SCALE end
 local function sy(iy) return hudY + iy * SCALE end
@@ -125,19 +218,14 @@ end
 local function drawCurvedLTR(rows, fraction, col, bgCol)
     if #rows == 0 then return end
     local globalX1 = math.huge
-    local globalX2 = -math.huge --find overall x boundary
+    local globalX2 = -math.huge
     for _, row in ipairs(rows) do
         if row.x1 < globalX1 then globalX1 = row.x1 end
         if row.x2 > globalX2 then globalX2 = row.x2 end
     end
-
-    local fillBoundary = globalX1 + (globalX2 - globalX1) * math.min(1, fraction) --how far we have filled
-    
-    --draw row clipped to boundary
+    local fillBoundary = globalX1 + (globalX2 - globalX1) * math.min(1, fraction)
     for _, row in ipairs(rows) do
-        --background for full row
         d2d.fill_rect(sx(row.x1), sy(row.y), sw(row.x2 - row.x1), sw(1), bgCol)
-        
         local clipX2 = math.min(row.x2, fillBoundary)
         if clipX2 > row.x1 then
             d2d.fill_rect(sx(row.x1), sy(row.y), sw(clipX2 - row.x1), sw(1), col)
@@ -146,22 +234,38 @@ local function drawCurvedLTR(rows, fraction, col, bgCol)
 end
 
 -- ============================================================
--- D2D api allows me to import the image for the UI
+-- D2D
 -- ============================================================
 local swaxeImage = nil
-local labelFont = nil
-local smallFont = nil
+local labelFont  = nil
+local smallFont  = nil
+local ampedFont  = nil
 
 d2d.register(function()
     swaxeImage = d2d.Image.new("swaxe_ui.png")
-    labelFont = d2d.Font.new("Arial", 13)
-    smallFont = d2d.Font.new("Arial", 11)
+    labelFont  = d2d.Font.new("Arial", 13)
+    smallFont  = d2d.Font.new("Arial", 11)
+    ampedFont  = d2d.Font.new("Arial Bold", 18)
 end,
 
 function()
-    if not hudVisible then return end
+    local dt = 1.0 / 60.0
+
+    --update fade target FIRST before any early returns
     local player = getPlayer()
-    if not player then return end
+    fadeTarget = (hudVisible and shouldShowHUD(player)) and 1.0 or 0.0
+
+    --step fade toward target
+    if fadeCurrent < fadeTarget then
+        fadeCurrent = math.min(fadeTarget, fadeCurrent + FADE_SPEED * dt)
+    elseif fadeCurrent > fadeTarget then
+        fadeCurrent = math.max(fadeTarget, fadeCurrent - FADE_SPEED * dt)
+    end
+
+    --nothing to draw if fully faded out
+    if fadeCurrent <= 0.001 then return end
+
+    local fade = fadeCurrent
 
     local swordEffect = getField(player, "_SwordEffect", nil)
     local isSwordMode = swordEffect ~= nil
@@ -171,7 +275,7 @@ function()
     local assistTimerMax = 3600.0
     local awakeGauge = getField(player, "_BottleAwakeGauge", 0)
     local awakeDuration = getField(player, "_BottleAwakeDurationTimer", 0)
-    local awakeDurationMax = getField(player, "_BottleAwakeDurationTime", 2700)
+    local awakeDurationMax = math.max(1, getField(player, "_BottleAwakeDurationTime", 2700))
     local awakeGaugeMax = 70.0
 
     local isAmped = awakeGauge > 0 and awakeDuration > 0
@@ -184,23 +288,35 @@ function()
     local ampFraction = math.max(0, math.min(1, awakeDuration / awakeDurationMax))
     local buildFraction = math.max(0, math.min(1, awakeGauge / awakeGaugeMax))
 
+    --detect transition into amped state and start flash timer
+    if isAmped and not wasAmped then
+        ampedFlashTimer = AMPED_FLASH_DURATION
+    end
+    wasAmped = isAmped
+
+    if ampedFlashTimer > 0 then
+        ampedFlashTimer = ampedFlashTimer - dt
+    end
+
     local t = os.clock()
     local pulse = (math.sin(t * FLASH_SPEED * math.pi * 2) + 1) / 2
 
-    --flash when low
-    --bar stays full, colour pulses like in wilds
-    local arrowLow  = arrowsActive and arrowFraction < FLASH_THRESHOLD
-    local ampLow    = isAmped      and ampFraction   < FLASH_THRESHOLD
+    local arrowLow = arrowsActive and arrowFraction < FLASH_THRESHOLD
+    local ampLow  = isAmped and ampFraction < FLASH_THRESHOLD
 
-    --elemental colour: teal normally, flashes bright cyan when low
+    local function fadeArgb(a, r, g, b)
+        return argb(math.floor(a * fade), r, g, b)
+    end
+
+    -- elemental colour: teal normally, flashes bright cyan when low
     local elemCol
     if arrowLow then
         local g = math.floor(220 + (255-220) * pulse)
         local b = math.floor(200 + (255-200) * pulse)
         local r = math.floor(0 + 80 * pulse)
-        elemCol = argb(255, r, g, b)
+        elemCol = fadeArgb(255, r, g, b)
     else
-        elemCol = ELEM_ON
+        elemCol = fadeArgb(255, 0, 220, 200)
     end
 
     --sword colour: indigo -> violet active -> flashes violet when low
@@ -209,28 +325,28 @@ function()
         if ampLow then
             local r = math.floor(160 + (220-160) * pulse)
             local g = math.floor(60  + (160-60)  * pulse)
-            swordCol = argb(255, r, g, 255)
+            swordCol = fadeArgb(255, r, g, 255)
         else
-            swordCol = SWORD_AMP
+            swordCol = fadeArgb(255, 160, 60, 255)
         end
-        --bar stays full when amp is active
         swordFraction = 1.0
     elseif isBuildingAmp then
-        swordCol = SWORD_BUILD
+        swordCol      = fadeArgb(200, 60, 60, 200)
         swordFraction = buildFraction
     else
-        swordCol = SWORD_BUILD
+        swordCol      = fadeArgb(200, 60, 60, 200)
         swordFraction = 0
     end
 
-    -- Elemental bar stays FULL when active, only flashes when low
     local elemFraction = arrowsActive and 1.0 or 0.0
+    local gaugeCol = reloadRequired
+        and fadeArgb(255, 220, 60, 30)
+        or  fadeArgb(255, 255, 200, 20)
+    local inactiveCol = fadeArgb(50, 30, 30, 40)
 
-    local gaugeCol = reloadRequired and GAUGE_LOW or GAUGE_FULL
-
-    --main gauge bar
+    --ain gauge bar
     local barW = MAIN_BAR.x2 - MAIN_BAR.x1
-    d2d.fill_rect(sx(MAIN_BAR.x1), sy(MAIN_BAR.y), sw(barW), sw(MAIN_BAR.h), INACTIVE)
+    d2d.fill_rect(sx(MAIN_BAR.x1), sy(MAIN_BAR.y), sw(barW), sw(MAIN_BAR.h), inactiveCol)
     if gaugeFraction > 0 then
         d2d.fill_rect(sx(MAIN_BAR.x1), sy(MAIN_BAR.y),
             sw(barW * gaugeFraction), sw(MAIN_BAR.h), gaugeCol)
@@ -238,7 +354,7 @@ function()
 
     --power axe / elem amp
     for _, row in ipairs(ELEM_LEFT) do
-        d2d.fill_rect(sx(row.x1), sy(row.y), sw(row.x2-row.x1), sw(1), INACTIVE)
+        d2d.fill_rect(sx(row.x1), sy(row.y), sw(row.x2-row.x1), sw(1), inactiveCol)
     end
     if arrowsActive then
         for _, row in ipairs(ELEM_LEFT) do
@@ -247,69 +363,75 @@ function()
     end
 
     --sword amp mode
-    drawCurvedLTR(ELEM_RIGHT, swordFraction, swordCol, INACTIVE)
+    drawCurvedLTR(ELEM_RIGHT, swordFraction, swordCol, inactiveCol)
 
-    --d2d api to import image
-    d2d.image(swaxeImage, hudX, hudY, DISP_W, DISP_H)
-
-    -- --labels on ui and reload indicator (not working rn)
-    -- local labelY = hudY + DISP_H + 5
-
-    -- d2d.fill_rect(hudX, labelY-1, 108, 17, TEXT_BG)
-    -- d2d.text(labelFont, isSwordMode and "SWORD MODE" or "AXE MODE",
-    --     hudX+3, labelY, isSwordMode and SWORD_LABEL or AXE_LABEL)
-
-    -- local dotCX = hudX + 116
-    -- local dotCY = labelY + 7
-    -- d2d.fill_ellipse(dotCX, dotCY, 5, 5, reloadRequired and RELOAD_YES or RELOAD_NO)
-    -- d2d.outline_ellipse(dotCX, dotCY, 5, 5, 1, argb(80, 255, 255, 255))
-    -- d2d.fill_rect(dotCX+8, labelY-1, 78, 17, TEXT_BG)
-    -- d2d.text(smallFont, reloadRequired and "RELOAD" or "NO RELOAD",
-    --     dotCX+10, labelY, reloadRequired and RELOAD_YES or TEXT_DIM)
-
-    -- local pctX = hudX + DISP_W + 6
-    -- d2d.text(smallFont,
-    --     string.format("SWITCH %d%%", math.floor(gaugeFraction*100)),
-    --     pctX, sy(10), reloadRequired and GAUGE_LOW or TEXT_DIM)
-    -- d2d.text(smallFont,
-    --     arrowsActive and string.format("E.AMP %d%%", math.floor(arrowFraction*100)) or "E.AMP —",
-    --     pctX, sy(26), arrowsActive and elemCol or TEXT_DIM)
-
-    -- local sLabel = isAmped      and string.format("S.AMP %d%%",  math.floor(ampFraction*100))
-    --            or isBuildingAmp and string.format("BUILD %d%%",  math.floor(buildFraction*100))
-    --            or "S.AMP —"
-    -- d2d.text(smallFont, sLabel, pctX, sy(32),
-    --     isAmped and swordCol or (isBuildingAmp and SWORD_BUILD or TEXT_DIM))
+    --image
+    d2d.image(swaxeImage, hudX, hudY, DISP_W, DISP_H, math.floor(fade * 255))
 
     --mode indicator
     local labelY = hudY + DISP_H + 5
-    d2d.fill_rect(hudX, labelY-1, 108, 17, TEXT_BG)
+    d2d.fill_rect(hudX, labelY-1, 108, 17, fadeArgb(130, 0, 0, 0))
     d2d.text(labelFont, isSwordMode and "SWORD MODE" or "AXE MODE",
-        hudX+3, labelY, isSwordMode and SWORD_LABEL or AXE_LABEL)
+        hudX+3, labelY,
+        isSwordMode and fadeArgb(255, 80, 160, 255) or fadeArgb(255, 200, 130, 50))
 
+    --"AMPED!" flash above the HUD when sword amp activates
+    if ampedFlashTimer > 0 then
+        local ampedFade = math.min(1.0, ampedFlashTimer / 0.4) * fade
+        if ampedFlashTimer < 0.5 then
+            ampedFade = (ampedFlashTimer / 0.5) * fade
+        end
+        local ar = math.floor(160 + (255-160) * pulse)
+        local ag = math.floor(60  + (200-60)  * pulse)
+        local ampedCol = argb(math.floor(255 * ampedFade), ar, ag, 255)
+        local ampedBg  = argb(math.floor(160 * ampedFade), 0, 0, 0)
+        local ampedX   = hudX + (DISP_W / 2) - 35
+        local ampedY   = hudY - 26
+        d2d.fill_rect(ampedX - 4, ampedY - 2, 82, 22, ampedBg)
+        d2d.text(ampedFont, "AMPED!", ampedX, ampedY, ampedCol)
+    end
 end)
 
 -- ============================================================
 -- REFramework menu
--- the buttons to rest position and show/hide ui
 -- ============================================================
 re.on_draw_ui(function()
     if imgui.tree_node("Switch Axe HUD") then
         local c, v = imgui.checkbox("Show HUD", hudVisible)
         if c then hudVisible = v end
+
+        imgui.spacing()
+
+        local scaleChanged, newScale = imgui.slider_float("Scale", SCALE, 0.5, 3.0, "%.1fx")
+        if scaleChanged then
+            SCALE  = newScale
+            DISP_W = IMG_W * SCALE
+            DISP_H = IMG_H * SCALE
+        end
+
+        local wChanged, newW = imgui.drag_int("Screen Width",  SCREEN_WIDTH,  1, 800, 7680)
+        if wChanged then SCREEN_WIDTH = newW end
+        local hChanged, newH = imgui.drag_int("Screen Height", SCREEN_HEIGHT, 1, 600, 4320)
+        if hChanged then SCREEN_HEIGHT = newH end
+
+        imgui.spacing()
+
         imgui.text(string.format("Position: %.0f, %.0f", hudX, hudY))
         if imgui.button("Reset Position") then
             hudX = (SCREEN_WIDTH/2) - (DISP_W/2)
             hudY = SCREEN_HEIGHT - DISP_H - 100
+            savePosition()
         end
+
         imgui.tree_pop()
     end
 end)
 
 -- ============================================================
--- drag n drop
+-- drag n drop + vanilla HUD suppression
 -- ============================================================
 re.on_frame(function()
+    --drag n drop
     local mouse = imgui.get_mouse()
     if not mouse then return end
     local mx, my = mouse.x, mouse.y
@@ -324,6 +446,20 @@ re.on_frame(function()
             hudY = dsHY + (my - dsMY)
         else
             dragging = false
+            savePosition()
         end
+    end
+
+    --vanilla HUD suppression
+    --disable the vanilla gauge when swaxe HUD is active
+    --re-enable when leave quest os wtich weapons
+    --so other weapon types and hub UI are never affected
+    local player = getPlayer()
+    local shouldShow = shouldShowHUD(player)
+    if shouldShow then
+        setVanillaHudVisible(false)
+    else
+        setVanillaHudVisible(true)
+        vanillaGuiComponent = nil
     end
 end)
